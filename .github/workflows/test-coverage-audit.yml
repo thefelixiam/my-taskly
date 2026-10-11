@@ -1,0 +1,455 @@
+name: Test & Coverage Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Optional PR number for the audit comment'
+        required: false
+        default: ''
+      comment_on_pr:
+        description: 'Publish audit summary as a PR comment'
+        type: boolean
+        required: false
+        default: true
+      improve:
+        description: 'Generate tests for coverage gaps and open a PR'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: test-coverage-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Backend typecheck
+        id: backend_typecheck
+        continue-on-error: true
+        run: npm run typecheck
+        working-directory: backend
+
+      - name: Backend tests and coverage
+        id: backend_coverage
+        continue-on-error: true
+        run: npm run test:coverage
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Frontend typecheck
+        id: frontend_typecheck
+        continue-on-error: true
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Frontend tests and coverage
+        id: frontend_coverage
+        continue-on-error: true
+        run: npm run test:coverage
+        working-directory: frontend
+
+      - name: Assemble audit summary
+        if: always()
+        env:
+          BACKEND_TYPECHECK: ${{ steps.backend_typecheck.outcome }}
+          BACKEND_COVERAGE: ${{ steps.backend_coverage.outcome }}
+          FRONTEND_TYPECHECK: ${{ steps.frontend_typecheck.outcome }}
+          FRONTEND_COVERAGE: ${{ steps.frontend_coverage.outcome }}
+        run: |
+          set -euo pipefail
+
+          mark() {
+            case "$1" in
+              success) echo "PASS" ;;
+              failure) echo "FAIL" ;;
+              *) echo "SKIPPED" ;;
+            esac
+          }
+
+          {
+            echo "# Test & Coverage Audit"
+            echo ""
+            echo "- Repository: \`$GITHUB_REPOSITORY\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Backend typecheck | $(mark "$BACKEND_TYPECHECK") |"
+            echo "| Backend tests + coverage | $(mark "$BACKEND_COVERAGE") |"
+            echo "| Frontend typecheck | $(mark "$FRONTEND_TYPECHECK") |"
+            echo "| Frontend tests + coverage | $(mark "$FRONTEND_COVERAGE") |"
+            echo ""
+          } > audit-summary.md
+
+          if [ -f backend/coverage/coverage-summary.json ]; then
+            node scripts/coverage-summary.mjs \
+              --coverage backend/coverage/coverage-summary.json \
+              --title "Backend coverage" >> audit-summary.md
+
+            node scripts/untested-files.mjs \
+              --mode backend --root backend \
+              --coverage backend/coverage/coverage-summary.json >> audit-summary.md
+          fi
+
+          if [ -f frontend/coverage/coverage-summary.json ]; then
+            node scripts/coverage-summary.mjs \
+              --coverage frontend/coverage/coverage-summary.json \
+              --title "Frontend coverage" >> audit-summary.md
+
+            node scripts/untested-files.mjs \
+              --mode frontend --root frontend \
+              --coverage frontend/coverage/coverage-summary.json >> audit-summary.md
+          fi
+
+          cat audit-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-summary
+          path: audit-summary.md
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Publish audit comment
+        if: ${{ !cancelled() && inputs.pr_number != '' && inputs.comment_on_pr }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/pr-comment.mjs \
+            --pr "$PR_NUMBER" \
+            --file audit-summary.md \
+            --marker test-coverage-audit \
+            --header "📊 Test & Coverage Audit"
+
+      - name: Fail if an audit check failed
+        if: always()
+        env:
+          BT: ${{ steps.backend_typecheck.outcome }}
+          BC: ${{ steps.backend_coverage.outcome }}
+          FT: ${{ steps.frontend_typecheck.outcome }}
+          FC: ${{ steps.frontend_coverage.outcome }}
+        run: |
+          if [ "$BT" != success ] || [ "$BC" != success ] ||
+             [ "$FT" != success ] || [ "$FC" != success ]; then
+            exit 1
+          fi
+
+  improve-generate:
+    needs: audit
+    if: inputs.improve && needs.audit.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      has_patch: ${{ steps.patch.outputs.has_patch }}
+    env:
+      OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/muse-spark-1.3-contributor-free' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Install OpenCode
+        run: npm install --global opencode-ai@1.19.0
+
+      - name: Backend coverage baseline
+        run: npm run test:coverage
+        working-directory: backend
+
+      - name: Frontend coverage baseline
+        run: npm run test:coverage
+        working-directory: frontend
+
+      - name: Prepare OpenCode config
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          AGENT_CONFIG_PATH: ${{ runner.temp }}/opencode-agent-config.json
+        run: node scripts/write-agent-config.mjs
+
+      - name: Build coverage targets
+        run: |
+          set -euo pipefail
+          mkdir -p .agent-output
+          {
+            echo "# Test coverage improvement targets"
+            node scripts/untested-files.mjs \
+              --mode backend --root backend \
+              --coverage backend/coverage/coverage-summary.json
+            node scripts/untested-files.mjs \
+              --mode frontend --root frontend \
+              --coverage frontend/coverage/coverage-summary.json
+          } > .agent-output/targets.md
+
+      - name: Run test-writer agent
+        timeout-minutes: 20
+        env:
+          OPENCODE_CONFIG: ${{ runner.temp }}/opencode-agent-config.json
+          AGENT_MODE: improve
+        run: |
+          set -euo pipefail
+          opencode run \
+            --agent test-writer \
+            --model "$OPENCODE_MODEL" \
+            --print-logs --log-level WARN \
+            "Read .agent-output/targets.md.
+             Generate or update unit tests only.
+             Do not run test suites in this job.
+             Use backend-testing and frontend-testing skills as appropriate.
+             Write the report to .agent-output/report.md."
+
+      - name: Create test-only patch
+        id: patch
+        run: |
+          set -euo pipefail
+
+          git add -A -- backend/tests frontend/src
+
+          invalid=$(git diff --cached --name-only |
+            grep -Ev '^(backend/tests/|frontend/src/.*\.test\.[jt]sx?$|frontend/src/test/)' || true)
+
+          if [ -n "$invalid" ]; then
+            echo "::error::Agent changed files outside test paths:"
+            printf '%s\n' "$invalid"
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/agent-artifacts"
+
+          if git diff --cached --quiet; then
+            echo "has_patch=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --cached --binary > "$RUNNER_TEMP/agent-artifacts/tests.patch"
+
+          if [ -f .agent-output/report.md ]; then
+            cp .agent-output/report.md "$RUNNER_TEMP/agent-artifacts/report.md"
+          else
+            echo "The agent did not provide a report." > "$RUNNER_TEMP/agent-artifacts/report.md"
+          fi
+
+          echo "has_patch=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload generated patch
+        if: steps.patch.outputs.has_patch == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: improve-generated-tests
+          path: ${{ runner.temp }}/agent-artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Summarize no-change outcome
+        if: steps.patch.outputs.has_patch == 'false'
+        run: |
+          {
+            echo "### Improve mode — no test changes"
+            echo ""
+            echo "The agent generated no test changes. Its report:"
+            echo ""
+            cat .agent-output/report.md 2>/dev/null || echo "_No report was produced._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  improve-verify:
+    needs: improve-generate
+    if: needs.improve-generate.outputs.has_patch == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download generated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: improve-generated-tests
+          path: ${{ runner.temp }}/generated
+
+      - name: Validate and apply patch
+        run: |
+          set -euo pipefail
+          patch="$RUNNER_TEMP/generated/tests.patch"
+          paths=$(git apply --numstat "$patch" | cut -f3)
+
+          if [ -z "$paths" ]; then
+            echo "::error::Patch is empty or invalid."
+            exit 1
+          fi
+
+          invalid=$(printf '%s\n' "$paths" |
+            grep -Ev '^(backend/tests/|frontend/src/.*\.test\.[jt]sx?$|frontend/src/test/)' || true)
+
+          if [ -n "$invalid" ]; then
+            echo "::error::Patch contains forbidden paths:"
+            printf '%s\n' "$invalid"
+            exit 1
+          fi
+
+          git apply --check "$patch"
+          git apply "$patch"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify backend
+        run: npm ci && npm run typecheck && npm test
+        working-directory: backend
+
+      - name: Verify frontend
+        run: npm ci && npm run typecheck && npm test
+        working-directory: frontend
+
+      - name: Upload verified patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: improve-verified-tests
+          path: |
+            ${{ runner.temp }}/generated/tests.patch
+            ${{ runner.temp }}/generated/report.md
+          if-no-files-found: error
+          retention-days: 1
+
+  improve-publish:
+    needs: [improve-generate, improve-verify]
+    if: needs.improve-generate.outputs.has_patch == 'true' && needs.improve-verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download verified patch
+        uses: actions/download-artifact@v4
+        with:
+          name: improve-verified-tests
+          path: ${{ runner.temp }}/verified
+
+      - name: Validate and apply verified patch
+        run: |
+          set -euo pipefail
+          patch="$RUNNER_TEMP/verified/tests.patch"
+          paths=$(git apply --numstat "$patch" | cut -f3)
+
+          if [ -z "$paths" ]; then
+            echo "::error::Patch is empty or invalid."
+            exit 1
+          fi
+
+          invalid=$(printf '%s\n' "$paths" |
+            grep -Ev '^(backend/tests/|frontend/src/.*\.test\.[jt]sx?$|frontend/src/test/)' || true)
+
+          if [ -n "$invalid" ]; then
+            echo "::error::Verified patch contains forbidden paths:"
+            printf '%s\n' "$invalid"
+            exit 1
+          fi
+
+          git apply --check "$patch"
+          git apply "$patch"
+
+      - name: Create branch and pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: audit/test-improvements-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "$BRANCH"
+          git add -- backend/tests frontend/src
+
+          if git diff --cached --quiet; then
+            echo "No test changes to publish."
+            exit 0
+          fi
+
+          git commit -m "test: improve unit-test coverage"
+
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+            push origin "HEAD:$BRANCH"
+
+          report="$RUNNER_TEMP/verified/report.md"
+          if [ ! -s "$report" ]; then
+            report="$RUNNER_TEMP/fallback-report.md"
+            echo "Generated tests passed independent verification." > "$report"
+          fi
+
+          {
+            cat "$report"
+            echo ""
+            echo "---"
+            echo "Generated by Test & Coverage Audit improve mode."
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          gh pr create \
+            --title "test: improve unit-test coverage" \
+            --body-file "$RUNNER_TEMP/pr-body.md" \
+            --head "$BRANCH"

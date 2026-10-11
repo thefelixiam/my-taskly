@@ -16,6 +16,11 @@ coverage/
 .env.*
 !.env.example
 
+.agent-output/
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+
 # Logs
 *.log
 
