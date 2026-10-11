@@ -15,7 +15,7 @@ Taskly full-stack app (Express + Prisma backend, React + Vite frontend).
 | Automatic PR workflow                         | `.github/workflows/pr-test-agent.yml`                                                                                    |
 | Manual audit workflow (+ improve mode)        | `.github/workflows/test-coverage-audit.yml`                                                                              |
 | Helper scripts (zero deps, Node)              | `scripts/coverage-summary.mjs`, `scripts/untested-files.mjs`, `scripts/pr-comment.mjs`, `scripts/write-agent-config.mjs` |
-| OpenCode project config                       | `opencode.json` (free Zen model as repo default, session sharing disabled)                                               |
+| OpenCode project config                       | `opencode.json` (free OpenRouter model as repo default, session sharing disabled)                                               |
 
 The agent operates in two modes:
 
@@ -31,21 +31,16 @@ single test authority. The agent only analyzes, writes tests, runs the cheap non
 
 ## Main technical decisions and rationale
 
-0. **Default model: a free, curated coding model from OpenCode Zen — `opencode/muse-spark-1.3-contributor-free`.**
-   Zen is OpenCode's curated gateway ("models … tested and verified to work well with OpenCode"), and its
-   pricing page lists free models explicitly. The choice was verified, not guessed:
-   - `opencode models opencode` on the installed version (1.19.0) lists 11 free Zen models — the chosen one
-     among them; a live `opencode run` smoke test against it returned successfully.
-   - Registry metadata (models.dev, the source opencode uses) confirms for this model: **tool calls ✅,
-     reasoning ✅, ~1M context** — the hard requirements for an agent that must call bash/edit/skill tools.
-   - It is the free "contributor" variant of the Muse Spark 1.3 family, whose paid sibling sits on the same
-     curated Zen list — i.e. the family is verified as a coding agent, and the free variant is aimed at
-     open-source contributions (exactly this use case).
-   - **Override:** set the repository variable `OPENCODE_MODEL` (format `provider/model`) — the CI passes it
-     as `-m`, which takes precedence over the agent's frontmatter `model:` (precedence verified on 1.19.0).
-   - `opencode.json` sets the same model as the repo-local default, which also applies to _interactive_
-     sessions in this repo (your own sessions can still pick another model per session, or remove the
-     `model` key to keep your global default).
+**Default model: a free model from OpenRouter — `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`.**
+OpenRouter is the model provider; OpenCode is the agent runtime. The `:free` suffix selects the free
+variant offered by OpenRouter, subject to provider availability, rate limits, and model changes.
+Authentication: CI uses the **`OPENROUTER_API_KEY`** GitHub Actions repository secret. The preparation
+script writes the provider credential into the OpenCode config outside the worktree. Override: set the
+repository variable `OPENCODE_MODEL` using the `provider/model-id` format — CI passes it to
+`opencode run` with `-m`. `opencode.json` and the agent configuration must use the same default model
+unless an explicit override is provided. Free-model availability and successful execution must be
+confirmed in a real GitHub Actions run.
+
 1. **OpenCode as the agent runtime, driven headlessly in CI.** OpenCode natively supports
    project-scoped agents (`.opencode/agents/*.md`), skills (`.opencode/skills/<name>/SKILL.md`
    loaded on demand via the `skill` tool), per-tool permission configuration in agent frontmatter,
@@ -87,8 +82,8 @@ single test authority. The agent only analyzes, writes tests, runs the cheap non
    - The **LLM API key never enters the agent's environment**: a preparation step writes it into
      an OpenCode config file at `$RUNNER_TEMP` (outside the worktree, mode 0600) from GitHub
      Actions Secrets; the agent step receives only `OPENCODE_CONFIG=<path>`. Live-verified: a fake
-     key injected this way reaches the Zen gateway and is rejected with `Invalid API key`, proving
-     the file-provided key is the one actually used.
+      key injected this way reaches the OpenRouter gateway and is rejected with an auth error,
+      proving the file-provided key is the one actually used.
    - The patch is path-validated at **every hop** (generation, verify, publish) — anything outside
      test paths is rejected before it can move through the pipeline.
 5. **Verified state == pushed state, by construction.** What verify applies and tests is the exact
@@ -119,14 +114,14 @@ generates no changes, its report is surfaced in the job summary instead.
 
 One-time setup (repository **Settings → Secrets and variables → Actions**):
 
-1. Add the **`OPENCODE_API_KEY`** repository secret — a key from OpenCode Zen
-   (sign in at **opencode.ai/auth**, create the API key). The default model is a **free** Zen model, so
-   agent runs cost nothing beyond Actions minutes.
-   Alternatives (only if you override the model): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-   `OPENROUTER_API_KEY` — the provider prefix of `OPENCODE_MODEL` selects which secret is required, and
-   any other provider fails fast with an explicit error listing the supported set.
+1. Add the **`OPENROUTER_API_KEY`** repository secret — a key from **openrouter.ai/keys**. The
+   default model is a **free** OpenRouter model, so agent runs cost nothing beyond Actions minutes.
+   Alternatives (only if you override the model): `OPENCODE_API_KEY` (OpenCode Zen),
+   `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` — the provider prefix of `OPENCODE_MODEL` selects which
+   secret is required, and any other provider fails fast with an explicit error listing the
+   supported set.
 2. _(Optional)_ Set repository variable `OPENCODE_MODEL` (format `provider/model-id`) to override the
-   default `opencode/muse-spark-1.3-contributor-free`.
+   default `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`.
 3. `GITHUB_TOKEN` needs nothing extra — permissions are declared per job in the workflow files.
 
 The API key is read **only** from GitHub Actions Secrets: a preparation step writes it into an
@@ -150,8 +145,9 @@ Then:
   human review.
 
 Local usage (same agent, no CI), on uncommitted changes. The agent's default model is the free
-Zen model from its frontmatter, so local runs need OpenCode Zen connected once (`/connect` →
-OpenCode Zen), or pass `-m <provider/model>` to use another provider:
+OpenRouter model from its frontmatter, so local runs need OpenRouter connected once (`/connect` →
+OpenRouter) or `OPENROUTER_API_KEY` in the environment, or pass `-m <provider/model>` to use another
+provider:
 
 ```sh
 WORKTREE_ONLY=1 PR_NUMBER=local PR_TITLE="my change" \
@@ -164,8 +160,8 @@ opencode run --agent test-writer "Execute the PR unit-test workflow. PR context 
 
 | Item                                                                                                  | Evidence                                                                                                                                                                                                       |
 | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Default free model exists in the installed version                                                    | `opencode models opencode` (v1.19.0) lists `opencode/muse-spark-1.3-contributor-free`; live `opencode run` smoke test against it replied successfully                                                          |
-| Config-file key injection works for the Zen provider                                                  | live test: fake `options.apiKey` in an out-of-worktree `OPENCODE_CONFIG` file → Zen gateway rejected it with `Invalid API key` (i.e. the file-provided key is actually used and overrides ambient auth)        |
+| Default free model exists in the installed version                                                    | `opencode models openrouter` (v1.19.0) lists `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`; live `opencode run` smoke test against it replied successfully                                              |
+| Config-file key injection works for the default provider                                              | live test: fake `options.apiKey` in an out-of-worktree `OPENCODE_CONFIG` file → OpenRouter rejected it with an auth error (`User not found`), i.e. the file-provided key is actually used over ambient auth |
 | `OPENCODE_MODEL` / `-m` can always override the agent's model                                         | live test: agent with frontmatter `model:` + CLI `-m` → the CLI model won (header line)                                                                                                                        |
 | Agent definition loads and runs on OpenCode 1.19.0                                                    | smoke test + three full `opencode run --agent test-writer` sessions                                                                                                                                            |
 | Skills are discovered and followed by the agent                                                       | flat-name test mapping, fixtures, `it.each`, workdir usage — knowledge that exists only in the skills                                                                                                          |
@@ -239,7 +235,7 @@ coverage gates green in both packages.
 
 - Node >= 22.12 via `setup-node` (matches `engines`); the Prisma client is generated by `npm ci`
   postinstall, so tests never need a running database.
-- The default model is free via OpenCode Zen, but the design is provider-agnostic within the four
+- The default model is free via OpenRouter, but the design is provider-agnostic within the four
   supported provider secrets; any other provider fails fast with a clear error.
 - PRs from the same repository are the target; fork PRs are skipped (secrets).
 - The backend has no formatter (semicolons/single quotes by convention); the frontend is
@@ -252,10 +248,11 @@ coverage gates green in both packages.
   (larger attack surface — not taken by default).
 - **GitHub Actions status:** everything runnable locally has been run and is documented above;
   the workflows themselves have **not** been executed on GitHub yet (see _Verification status_).
-- **Free-model caveats:** Zen free models are offered "for a limited time" and may be rate-limited
-  or less capable than paid models; the generated test quality depends on the model. If quality
-  degrades, switch with the `OPENCODE_MODEL` repository variable (e.g. to a paid Zen model or
-  another provider) — no other changes needed. Locally tested with GLM-5.3.
+- **Free-model caveats:** OpenRouter `:free` models are rate-limited, subject to availability, and
+  less capable than paid models; the generated test quality depends on the model. If quality
+  degrades, switch with the `OPENCODE_MODEL` repository variable (e.g. to a paid OpenRouter model
+  or another provider) — no other changes needed. Locally smoke-tested with
+  `openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`.
 - **Residual exfiltration risk (inherent to the design):** the agent writes executable code
   (tests) that a verify job runs on a runner that also holds its own LLM key (outside the
   worktree). The permission allowlists, the out-of-worktree key file, and prompt-injection

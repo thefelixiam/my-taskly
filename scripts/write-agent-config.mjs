@@ -2,7 +2,7 @@
 
 import { writeFileSync } from 'node:fs';
 
-const DEFAULT_MODEL = 'opencode/muse-spark-1.3-contributor-free';
+const DEFAULT_MODEL = 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free';
 
 const providers = {
   opencode: { env: 'OPENCODE_API_KEY', config: (apiKey) => ({ options: { apiKey } }) },
