@@ -2,7 +2,7 @@
 description: Analyzes pull request changes or audit targets, creates or updates unit tests for changed frontend and backend code, and verifies the suites pass
 mode: primary
 temperature: 0.1
-model: opencode/muse-spark-1.3-contributor-free
+model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 steps: 200
 permission:
   read: allow

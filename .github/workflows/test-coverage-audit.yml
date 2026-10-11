@@ -179,7 +179,7 @@ jobs:
     outputs:
       has_patch: ${{ steps.patch.outputs.has_patch }}
     env:
-      OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/muse-spark-1.3-contributor-free' }}
+      OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'openrouter/nvidia/nemotron-3-ultra-550b-a55b:free' }}
 
     steps:
       - name: Checkout
